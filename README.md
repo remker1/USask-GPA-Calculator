@@ -43,5 +43,4 @@ python run_calculation.py
 
 ---
 
-Let me know if you want to include screenshots or any other specific details in the README. 
-```
+Let me know if you want to include screenshots or any other specific details in the README.
