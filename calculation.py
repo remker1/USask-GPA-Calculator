@@ -62,12 +62,14 @@ def calculate_weighted_average(courses):
     total_credits = 0.0
     weighted_sum = 0.0
     for course in courses:
+        if course.grade == "W":
+            continue  # Skip withdrawal courses
         try:
             grade = float(course.grade)  # Attempt to convert grade to float
             total_credits += course.credit_hours
             weighted_sum += grade * course.credit_hours
         except ValueError:
-            continue  # Skip if grade is not numeric (e.g., TR or W)
+            continue  # Skip if grade is not numeric (e.g., TR)
     average = weighted_sum / total_credits if total_credits > 0 else 0  # Avoid division by zero
     return total_credits, weighted_sum, average
 
