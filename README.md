@@ -44,3 +44,7 @@ python run_calculation.py
 ---
 
 Let me know if you want to include screenshots or any other specific details in the README.
+
+---
+
+> 😂 *Remember: GPA isn't everything—unless you're a GPA. Then it's literally your whole identity.*

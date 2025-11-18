@@ -1,10 +1,22 @@
 from courses import Course
 import re
 import fitz  # PyMuPDF
-import tkinter as tk
-from tkinter import ttk
-from tkinter import simpledialog, messagebox
 import os
+import sys
+from PySide6.QtWidgets import (
+    QApplication,
+    QMainWindow,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QTableWidget,
+    QTableWidgetItem,
+    QPushButton,
+    QMessageBox,
+    QInputDialog,
+)
+from PySide6.QtCore import Qt
 
 # This script reads a PDF containing course information, parses the data to create Course objects,
 # and provides a GUI to display, modify, and calculate weighted averages of grades for those courses.
@@ -112,38 +124,187 @@ def check_updated_average(courses):
     except ValueError:
         print("Invalid input. Please enter in the format: CMPT214, 85")
 
-def on_double_click(event):
-    """Handles the double-click event on the course tree to edit grades."""
-    selected_item = tree.focus()  # Get the currently selected item
-    if not selected_item:
-        return  # Exit if no item is selected
-    values = tree.item(selected_item, "values")  # Get the values of the selected item
-    if not values:
-        return  # Exit if no values are found
+class MainWindow(QMainWindow):
+    def __init__(self, courses, original_courses):
+        super().__init__()
+        self.setWindowTitle("Course Transcript Summary")
 
-    label = values[0]  # Get the course label
+        self.courses = courses
+        # original_courses is a dict: label -> Course
+        self.original_courses = original_courses
 
-    # Prompt for new grade
-    new_grade = simpledialog.askstring("Edit Grade", f"Enter new grade for {label}:")
+        central = QWidget()
+        self.setCentralWidget(central)
 
-    if new_grade:
-        for i, course in enumerate(unique_courses):
+        main_layout = QVBoxLayout(central)
+
+        instruction_label = QLabel("Double-click a grade to modify it to see an estimate")
+        main_layout.addWidget(instruction_label)
+
+        self.table = QTableWidget(len(self.courses), 4)
+        self.table.setHorizontalHeaderLabels(["Course", "Title", "Grade", "Credits"])
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        self.table.cellDoubleClicked.connect(self.edit_grade)
+
+        main_layout.addWidget(self.table)
+
+        self.summary_label = QLabel()
+        self.summary_label.setAlignment(Qt.AlignLeft)
+        main_layout.addWidget(self.summary_label)
+
+        button_row = QHBoxLayout()
+        self.restore_btn = QPushButton("Restore Original Grades")
+        self.restore_btn.clicked.connect(self.restore_grades)
+        button_row.addWidget(self.restore_btn)
+
+        self.add_btn = QPushButton("Add New Course")
+        self.add_btn.clicked.connect(self.add_course)
+        button_row.addWidget(self.add_btn)
+
+        self.delete_btn = QPushButton("Delete Selected Course")
+        self.delete_btn.clicked.connect(self.delete_course)
+        button_row.addWidget(self.delete_btn)
+
+        main_layout.addLayout(button_row)
+
+        self.populate_table()
+        self.update_summary()
+
+    def populate_table(self):
+        self.table.setRowCount(len(self.courses))
+        for row, course in enumerate(self.courses):
+            label_item = QTableWidgetItem(course.label)
+            title_item = QTableWidgetItem(course.title)
+            grade_item = QTableWidgetItem(str(course.grade))
+            credits_item = QTableWidgetItem(f"{course.credit_hours:.3f}")
+
+            label_item.setFlags(label_item.flags() & ~Qt.ItemIsEditable)
+            title_item.setFlags(title_item.flags() & ~Qt.ItemIsEditable)
+            credits_item.setFlags(credits_item.flags() & ~Qt.ItemIsEditable)
+
+            self.table.setItem(row, 0, label_item)
+            self.table.setItem(row, 1, title_item)
+            self.table.setItem(row, 2, grade_item)
+            self.table.setItem(row, 3, credits_item)
+
+        self.table.resizeColumnsToContents()
+
+    def update_summary(self):
+        total_credits, weighted_sum, average = calculate_weighted_average(self.courses)
+        self.summary_label.setText(
+            f"Total Credits: {total_credits:.3f}    "
+            f"Weighted Grade Sum: {weighted_sum:.2f}    "
+            f"Average Grade: {average:.2f}"
+        )
+
+    def find_course_by_label(self, label):
+        for course in self.courses:
             if course.label == label:
-                try:
-                    float(new_grade)  # Validate grade is numeric or accepted format
-                    course.grade = new_grade  # Update the course grade
-                    # Update the tree view with the new values
-                    tree.item(selected_item, values=(course.label, course.title, course.grade, course.credit_hours))
-                    total_credits, weighted_sum, average = calculate_weighted_average(unique_courses)
-                    # Update the summary frame with new totals
-                    for widget in summary_frame.winfo_children():
-                        widget.destroy()
-                    tk.Label(summary_frame, text=f"Total Credits: {total_credits}").pack()
-                    tk.Label(summary_frame, text=f"Weighted Grade Sum: {weighted_sum}").pack()
-                    tk.Label(summary_frame, text=f"Average Grade: {average:.2f}").pack()
-                except ValueError:
-                    tk.messagebox.showerror("Invalid Grade", "Please enter a valid numeric grade or allowed value.")
-                break
+                return course
+        return None
+
+    def edit_grade(self, row, column):
+        # Only allow editing on the Grade column, but we still accept double-click on any column and prompt for grade
+        label_item = self.table.item(row, 0)
+        if label_item is None:
+            return
+        label = label_item.text()
+
+        course = self.find_course_by_label(label)
+        if course is None:
+            return
+
+        current_grade = str(course.grade)
+        new_grade, ok = QInputDialog.getText(
+            self,
+            "Edit Grade",
+            f"Enter new grade for {label}:",
+            text=current_grade,
+        )
+        if not ok or not new_grade.strip():
+            return
+
+        new_grade = new_grade.strip()
+        try:
+            float(new_grade)
+        except ValueError:
+            QMessageBox.critical(self, "Invalid Grade", "Please enter a valid numeric grade.")
+            return
+
+        course.grade = new_grade
+        # Update table
+        self.table.item(row, 2).setText(str(course.grade))
+        self.update_summary()
+
+    def restore_grades(self):
+        # Recreate courses list from original_courses dict
+        self.courses = [Course(**self.original_courses[label].to_dict()) for label in self.original_courses]
+        self.populate_table()
+        self.update_summary()
+
+    def add_course(self):
+        text, ok = QInputDialog.getText(
+            self,
+            "Add Course",
+            "Enter course in format: LABEL,GRADE,CREDITS\nExample: CMPT499,85,3",
+        )
+        if not ok or not text.strip():
+            return
+
+        user_input = text.strip()
+        try:
+            label, grade, credit_str = [part.strip() for part in user_input.split(",")]
+            float_grade = float(grade)  # validate
+            credit_hours = float(credit_str)
+        except ValueError:
+            QMessageBox.critical(
+                self,
+                "Invalid Input",
+                "Please enter the course in the correct format: LABEL,GRADE,CREDITS",
+            )
+            return
+
+        new_course = Course(
+            label=label,
+            location="Temporary Estimate",
+            level="Temporary Estimate",
+            title="Temporary Estimate",
+            grade=grade,
+            credit_hours=credit_hours,
+        )
+        self.courses.append(new_course)
+        self.populate_table()
+        self.update_summary()
+
+    def delete_course(self):
+        row = self.table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "Delete Course", "Please select a course to delete.")
+            return
+
+        label_item = self.table.item(row, 0)
+        if label_item is None:
+            return
+
+        label = label_item.text()
+
+        reply = QMessageBox.question(
+            self,
+            "Confirm Deletion",
+            f"Are you sure you want to delete {label}?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+            )
+        if reply != QMessageBox.Yes:
+            return
+
+        # Remove from list
+        self.courses = [course for course in self.courses if course.label != label]
+
+        # Remove row from table
+        self.table.removeRow(row)
+        self.update_summary()
 
 if __name__ == "__main__":
     def find_pdf_file():
@@ -156,132 +317,602 @@ if __name__ == "__main__":
     pdf_file = find_pdf_file()  # Attempt to find a PDF file
     if not pdf_file:
         print("No PDF file found in the current directory.")
-        exit()
+        sys.exit(1)
 
     pdf_text = read_pdf(pdf_file)  # Read the PDF file
     courses = parse_courses(pdf_text)  # Parse the courses from the text
     unique_courses = deduplicate_courses(courses)  # Remove duplicates
-    original_courses = {course.label: Course(**course.to_dict()) for course in unique_courses}  # Store original courses
-    total_credits, weighted_sum, average = calculate_weighted_average(unique_courses)  # Calculate initial totals
 
-    root = tk.Tk()  # Create the main application window
-    root.title("Course Transcript Summary")
+    # Store original courses as a dict of label -> Course
+    original_courses = {course.label: Course(**course.to_dict()) for course in unique_courses}
 
-    instruction_label = tk.Label(root, text="Double-click to modify the grades to see an estimate")
-    instruction_label.pack(pady=5)  # Instruction label
+    app = QApplication(sys.argv)
+    window = MainWindow(unique_courses, original_courses)
+    window.resize(900, 600)
+    window.show()
+    sys.exit(app.exec())
+"""Course transcript parser and GPA estimator GUI.
 
-    # Create a treeview to display course information
-    tree = ttk.Treeview(root, columns=("Label", "Title", "Grade", "Credits"), show="headings")
-    tree.heading("Label", text="Course")
-    tree.heading("Title", text="Title")
-    tree.heading("Grade", text="Grade")
-    tree.heading("Credits", text="Credits")
-    tree.column("Label", anchor="center")
-    tree.column("Title", anchor="center")
-    tree.column("Grade", anchor="center")
-    tree.column("Credits", anchor="center")
+This script:
+- Scans the current directory for a transcript PDF.
+- Extracts text from the PDF using PyMuPDF (fitz).
+- Parses course entries and creates Course objects.
+- Deduplicates courses that appear multiple times, keeping the latest one.
+- Provides a Qt (PySide6) GUI to:
+  - View all parsed courses.
+  - Edit grades to estimate GPA changes.
+  - Add temporary / hypothetical courses.
+  - Delete courses.
+  - Restore all original grades.
 
-    for course in unique_courses:
-        tree.insert("", "end", values=(course.label, course.title, course.grade, course.credit_hours))  # Insert courses into tree
+The main entry point is at the bottom of the file under the
+`if __name__ == "__main__":` guard.
+"""
 
-    tree.pack(fill="both", expand=True)  # Pack treeview to fill the window
-    tree.bind("<Double-1>", on_double_click)  # Bind double-click event to the on_double_click function
+from courses import Course
+import re
+import fitz  # PyMuPDF: provides PDF reading and text extraction
+import os
+import sys
+from PySide6.QtWidgets import (
+    QApplication,
+    QMainWindow,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QTableWidget,
+    QTableWidgetItem,
+    QPushButton,
+    QMessageBox,
+    QInputDialog,
+)
+from PySide6.QtCore import Qt
 
-    summary_frame = tk.Frame(root)  # Frame to display summary information
-    summary_frame.pack(pady=10)
 
-    tk.Label(summary_frame, text=f"Total Credits: {total_credits}").pack()  # Total credits label
-    tk.Label(summary_frame, text=f"Weighted Grade Sum: {weighted_sum}").pack()  # Weighted grade sum label
-    tk.Label(summary_frame, text=f"Average Grade: {average:.2f}").pack()  # Average grade label
+def read_pdf(file_path: str) -> str:
+    """Read a PDF file and return its full text content as a single string.
 
-    def restore_grades():
-        """Restores the original grades of the courses."""
-        global unique_courses
-        unique_courses = [Course(**original_courses[label].to_dict()) for label in original_courses]  # Restore original courses
+    Parameters
+    ----------
+    file_path : str
+        Path to the PDF transcript file.
 
-        # Clear and repopulate the tree
-        for item in tree.get_children():
-            tree.delete(item)  # Remove existing items from the tree
-        for course in unique_courses:
-            tree.insert("", "end", values=(course.label, course.title, course.grade, course.credit_hours))  # Insert restored courses
+    Returns
+    -------
+    str
+        Concatenated text from all pages of the PDF.
+    """
+    text = ""
 
-        # Update summary with restored grades
-        total_credits, weighted_sum, average = calculate_weighted_average(unique_courses)
-        for widget in summary_frame.winfo_children():
-            widget.destroy()  # Clear existing summary labels
-        tk.Label(summary_frame, text=f"Total Credits: {total_credits}").pack()  # Update total credits
-        tk.Label(summary_frame, text=f"Weighted Grade Sum: {weighted_sum}").pack()  # Update weighted grade sum
-        tk.Label(summary_frame, text=f"Average Grade: {average:.2f}").pack()  # Update average grade
+    # Open the PDF; fitz.Document is used as a context manager.
+    with fitz.open(file_path) as doc:
+        for page in doc:
+            # `get_text()` extracts the visible text content from each page.
+            text += page.get_text()
 
-    restore_btn = tk.Button(root, text="Restore Original Grades", command=restore_grades)
-    restore_btn.pack(pady=5)  # Button to restore original grades
+    return text
 
-    def add_course():
-        """Prompts the user to add a new course."""
-        user_input = simpledialog.askstring("Add Course", "Enter course in format: LABEL,GRADE,CREDITS\nExample: CMPT499,85,3")
-        if not user_input:
-            return  # Exit if no input
+
+def parse_courses(text: str) -> list[Course]:
+    """Parse raw transcript text and return a list of Course objects.
+
+    This is tightly coupled to the transcript's layout and uses a regex to
+    capture:
+    - subject (e.g. CMPT)
+    - code    (e.g. 214)
+    - level   (UG/GR)
+    - title   (course name)
+    - grade   (numeric grade, TR, or W)
+    - credit_hours (e.g. 3.000)
+
+    Parameters
+    ----------
+    text : str
+        Full transcript text extracted from the PDF.
+
+    Returns
+    -------
+    list[Course]
+        A list of parsed Course instances.
+    """
+
+    # Regex pattern to match each course line / block. This is based on the
+    # USask transcript format and may need adjustments if the layout changes.
+    course_pattern = re.compile(
+        r"(?P<subject>[A-Z]{2,4})\s+"  # Subject code, e.g. CMPT
+        r"(?P<code>\d{3}|[A-Z]+)\s+"   # Course number or letter code
+        r".*?(Campus|Site)\s+"         # Campus / Site marker (non-capturing)
+        r"(?P<level>UG|GR)\s+"         # Level: Undergraduate or Graduate
+        r"(?P<title>.*?)\s+"           # Course title (lazy match)
+        r"(?P<grade>\d{1,3}|TR|W)\s+" # Grade: numeric, TR, or W
+        r"(?P<credit_hours>\d\.\d{3})", # Credit hours: 3.000, 1.500, etc.
+        re.dotall,
+    )
+
+    courses: list[Course] = []
+
+    # Iterate over every match of the course pattern in the transcript text.
+    for match in course_pattern.finditer(text):
+        # Create a compact label (e.g. CMPT214) used as a unique identifier.
+        label = f"{match.group('subject')}{match.group('code')}"
+
+        # `match.group(0)` returns the full matched text for this course.
+        raw_location = match.group(0)
+
+        # Determine location based on whether 'Off-campus' appears in the block.
+        # This is a heuristic: if the transcript format changes, you may need
+        # to adjust this logic.
+        if "Off-campus" in raw_location:
+            location = "Off-campus Site"
+        else:
+            location = "USask - Main Campus"
+
+        level = match.group("level")
+
+        # Normalize whitespace in the title by splitting and rejoining.
+        title = " ".join(match.group("title").split())
+
+        grade = match.group("grade")
+        credit_hours = float(match.group("credit_hours"))
+
+        # Create a Course object and append it to the list.
+        course = Course(
+            label=label,
+            location=location,
+            level=level,
+            title=title,
+            grade=grade,
+            credit_hours=credit_hours,
+        )
+        courses.append(course)
+
+    return courses
+
+
+def deduplicate_courses(courses: list[Course]) -> list[Course]:
+    """Remove duplicate courses based on the label, keeping the latest one.
+
+    If the same course label appears multiple times in the transcript (e.g.
+    repeat attempts), this function keeps only the last occurrence in the
+    input list.
+
+    Parameters
+    ----------
+    courses : list[Course]
+        Courses in the original order returned by parsing.
+
+    Returns
+    -------
+    list[Course]
+        A list where each `label` appears at most once.
+    """
+    unique: dict[str, Course] = {}
+
+    # We rely on the fact that later items overwrite earlier ones, so the
+    # resulting dict keeps the last occurrence of each course label.
+    for course in courses:
+        key = course.label
+        unique[key] = course
+
+    return list(unique.values())
+
+
+def calculate_weighted_average(courses: list[Course]) -> tuple[float, float, float]:
+    """Calculate total credits, weighted grade sum, and average grade.
+
+    Courses with grade "W" are ignored. Courses with non-numeric grades such
+    as "TR" are also skipped because they do not contribute to numeric GPA.
+
+    Parameters
+    ----------
+    courses : list[Course]
+        List of courses to include in the calculation.
+
+    Returns
+    -------
+    (float, float, float)
+        (total_credits, weighted_sum, average), where `average` is 0 if
+        `total_credits` is 0.
+    """
+    total_credits: float = 0.0
+    weighted_sum: float = 0.0
+
+    for course in courses:
+        # Skip withdrawals entirely.
+        if course.grade == "W":
+            continue
+
         try:
-            label, grade, credit_str = [part.strip() for part in user_input.split(",")]
-            float_grade = float(grade)  # Validate grade as float
-            credit_hours = float(credit_str)  # Validate credits as float
+            # Convert the grade to a float. This will fail for "TR" and other
+            # non-numeric grades.
+            grade_value = float(course.grade)
         except ValueError:
-            messagebox.showerror("Invalid Input", "Please enter the course in the correct format: LABEL,GRADE,CREDITS")
-            return  # Exit if input is invalid
+            # Non-numeric grade: ignore this course in GPA calculation.
+            continue
 
-        # Create a new Course object with temporary values
+        # At this point, we know the grade is numeric.
+        total_credits += course.credit_hours
+        weighted_sum += grade_value * course.credit_hours
+
+    # Protect against division by zero when there are no valid credit courses.
+    average = weighted_sum / total_credits if total_credits > 0 else 0.0
+    return total_credits, weighted_sum, average
+
+
+def check_updated_average(courses: list[Course]) -> None:
+    """CLI helper to prompt for a new grade and recompute the average.
+
+    This function is currently unused in the GUI, but is kept for
+    command-line experiments.
+
+    Parameters
+    ----------
+    courses : list[Course]
+        Existing course list whose grades may be updated temporarily.
+    """
+    user_input = input(
+        "\nEnter a course label and new grade separated by a comma "
+        "(or press Enter to skip): "
+    ).strip()
+
+    # If the user just presses Enter, we do nothing.
+    if not user_input:
+        return
+
+    try:
+        # Expect input in the format: CMPT214, 85
+        label, new_grade = [part.strip() for part in user_input.split(",")]
+
+        updated_courses: list[Course] = []
+        found = False
+
+        for course in courses:
+            if course.label == label:
+                # Create a new Course object with the updated grade while
+                # keeping all other fields the same.
+                updated_course = Course(
+                    label=course.label,
+                    location=course.location,
+                    level=course.level,
+                    title=course.title,
+                    grade=new_grade,
+                    credit_hours=course.credit_hours,
+                )
+                updated_courses.append(updated_course)
+                found = True
+            else:
+                updated_courses.append(course)
+
+        if not found:
+            print(f"Course '{label}' not found.")
+            return
+
+        total_credits, weighted_sum, average = calculate_weighted_average(
+            updated_courses
+        )
+        print(f"\nUpdated Total Credits: {total_credits}")
+        print(f"Updated Weighted Grade Sum: {weighted_sum}")
+        print(f"Updated Average Grade: {average:.2f}")
+
+    except ValueError:
+        print("Invalid input. Please enter in the format: CMPT214, 85")
+
+
+class MainWindow(QMainWindow):
+    """Main application window for visualizing and editing course grades.
+
+    The window shows:
+    - A table of all courses (label, title, grade, credits).
+    - A summary row with total credits, weighted sum, and average.
+    - Buttons to restore original grades, add a new course, and delete the
+      currently selected course.
+
+    Double-clicking on a row opens a dialog to edit the grade for that course.
+    """
+
+    def __init__(self, courses: list[Course], original_courses: dict[str, Course]):
+        super().__init__()
+        self.setWindowTitle("Course Transcript Summary")
+
+        # `courses` is the working list that the user can modify.
+        self.courses: list[Course] = courses
+
+        # `original_courses` is a mapping from label -> Course representing
+        # the unmodified state from the transcript. Used to restore the table.
+        self.original_courses: dict[str, Course] = original_courses
+
+        # Set up the central widget and base vertical layout.
+        central = QWidget()
+        self.setCentralWidget(central)
+        main_layout = QVBoxLayout(central)
+
+        # High-level instructions for the user.
+        instruction_label = QLabel(
+            "Double-click a grade to modify it and see an updated estimate."
+        )
+        main_layout.addWidget(instruction_label)
+
+        # ------------------------------------------------------------------
+        # Courses table
+        # ------------------------------------------------------------------
+        # 4 columns: Course label, Title, Grade, Credits
+        self.table = QTableWidget(len(self.courses), 4)
+        self.table.setHorizontalHeaderLabels(["Course", "Title", "Grade", "Credits"])
+
+        # Make row-based selection feel more natural (click anywhere on row).
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
+
+        # Connect double-click on any cell to grade editing logic.
+        self.table.cellDoubleClicked.connect(self.edit_grade)
+
+        main_layout.addWidget(self.table)
+
+        # Summary label: shows total credits, weighted sum, and average GPA.
+        self.summary_label = QLabel()
+        self.summary_label.setAlignment(Qt.AlignLeft)
+        main_layout.addWidget(self.summary_label)
+
+        # ------------------------------------------------------------------
+        # Buttons row
+        # ------------------------------------------------------------------
+        button_row = QHBoxLayout()
+
+        self.restore_btn = QPushButton("Restore Original Grades")
+        self.restore_btn.clicked.connect(self.restore_grades)
+        button_row.addWidget(self.restore_btn)
+
+        self.add_btn = QPushButton("Add New Course")
+        self.add_btn.clicked.connect(self.add_course)
+        button_row.addWidget(self.add_btn)
+
+        self.delete_btn = QPushButton("Delete Selected Course")
+        self.delete_btn.clicked.connect(self.delete_course)
+        button_row.addWidget(self.delete_btn)
+
+        main_layout.addLayout(button_row)
+
+        # Populate the table with the initial course data and update summary.
+        self.populate_table()
+        self.update_summary()
+
+    # ------------------------------------------------------------------
+    # Table and summary helpers
+    # ------------------------------------------------------------------
+    def populate_table(self) -> None:
+        """Fill the QTableWidget with the current list of courses.
+
+        This is called after any operation that changes `self.courses`.
+        """
+        self.table.setRowCount(len(self.courses))
+
+        for row, course in enumerate(self.courses):
+            # Create table items for each column.
+            label_item = QTableWidgetItem(course.label)
+            title_item = QTableWidgetItem(course.title)
+            grade_item = QTableWidgetItem(str(course.grade))
+            credits_item = QTableWidgetItem(f"{course.credit_hours:.3f}")
+
+            # Only grade cells are editable by the user directly via double-click.
+            label_item.setFlags(label_item.flags() & ~Qt.ItemIsEditable)
+            title_item.setFlags(title_item.flags() & ~Qt.ItemIsEditable)
+            credits_item.setFlags(credits_item.flags() & ~Qt.ItemIsEditable)
+
+            self.table.setItem(row, 0, label_item)
+            self.table.setItem(row, 1, title_item)
+            self.table.setItem(row, 2, grade_item)
+            self.table.setItem(row, 3, credits_item)
+
+        # Resize columns to fit their content for better readability.
+        self.table.resizeColumnsToContents()
+
+    def update_summary(self) -> None:
+        """Recompute statistics and update the summary label text."""
+        total_credits, weighted_sum, average = calculate_weighted_average(self.courses)
+
+        # Format the summary string with 3 decimal places for credits and
+        # 2 decimal places for the numeric sums.
+        self.summary_label.setText(
+            f"Total Credits: {total_credits:.3f}    "
+            f"Weighted Grade Sum: {weighted_sum:.2f}    "
+            f"Average Grade: {average:.2f}"
+        )
+
+    def find_course_by_label(self, label: str) -> Course | None:
+        """Return the first course matching `label`, or None if not found."""
+        for course in self.courses:
+            if course.label == label:
+                return course
+        return None
+
+    # ------------------------------------------------------------------
+    # Grade editing and course operations
+    # ------------------------------------------------------------------
+    def edit_grade(self, row: int, column: int) -> None:
+        """Prompt the user to edit the grade for the double-clicked course.
+
+        The dialog appears when the user double-clicks any column in a row,
+        but only the grade value is editable.
+        """
+        # Identify the course by its label (column 0).
+        label_item = self.table.item(row, 0)
+        if label_item is None:
+            return
+
+        label = label_item.text()
+        course = self.find_course_by_label(label)
+        if course is None:
+            return
+
+        current_grade = str(course.grade)
+
+        # Ask the user for the new grade, pre-filled with the current one.
+        new_grade, ok = QInputDialog.getText(
+            self,
+            "Edit Grade",
+            f"Enter new grade for {label}:",
+            text=current_grade,
+        )
+        if not ok or not new_grade.strip():
+            # User cancelled or left the input empty.
+            return
+
+        new_grade = new_grade.strip()
+
+        # Validate that the grade is numeric to keep calculations consistent.
+        try:
+            float(new_grade)
+        except ValueError:
+            QMessageBox.critical(self, "Invalid Grade", "Please enter a valid numeric grade.")
+            return
+
+        # Update the in-memory Course object.
+        course.grade = new_grade
+
+        # Reflect the new grade in the table cell.
+        self.table.item(row, 2).setText(str(course.grade))
+
+        # Recompute and display the updated summary statistics.
+        self.update_summary()
+
+    def restore_grades(self) -> None:
+        """Restore all grades to their original transcript values.
+
+        This reconstructs `self.courses` from `self.original_courses`.
+        """
+        # Recreate the list of Course objects by cloning the originals.
+        self.courses = [
+            Course(**self.original_courses[label].to_dict())
+            for label in self.original_courses
+        ]
+
+        self.populate_table()
+        self.update_summary()
+
+    def add_course(self) -> None:
+        """Prompt the user to add a new (temporary) course to the table.
+
+        The new course is intended for "what-if" GPA scenarios and is
+        labeled as a temporary estimate for location, level, and title.
+        """
+        text, ok = QInputDialog.getText(
+            self,
+            "Add Course",
+            "Enter course in format: LABEL,GRADE,CREDITS\nExample: CMPT499,85,3",
+        )
+        if not ok or not text.strip():
+            # User cancelled or provided an empty string.
+            return
+
+        user_input = text.strip()
+
+        try:
+            # Split input by comma and normalize whitespace around each part.
+            label, grade, credit_str = [part.strip() for part in user_input.split(",")]
+
+            # Validate that grade and credits are numeric.
+            float_grade = float(grade)  # noqa: F841  # used only for validation
+            credit_hours = float(credit_str)
+        except ValueError:
+            QMessageBox.critical(
+                self,
+                "Invalid Input",
+                "Please enter the course in the correct format: LABEL,GRADE,CREDITS",
+            )
+            return
+
+        # Create a new temporary Course object.
         new_course = Course(
             label=label,
             location="Temporary Estimate",
             level="Temporary Estimate",
             title="Temporary Estimate",
             grade=grade,
-            credit_hours=credit_hours
+            credit_hours=credit_hours,
         )
-        unique_courses.append(new_course)  # Add new course to the list
-        tree.insert("", "end", values=(new_course.label, new_course.title, new_course.grade, new_course.credit_hours))  # Insert into tree
 
-        # Update summary with new totals
-        total_credits, weighted_sum, average = calculate_weighted_average(unique_courses)
-        for widget in summary_frame.winfo_children():
-            widget.destroy()  # Clear existing summary labels
-        tk.Label(summary_frame, text=f"Total Credits: {total_credits}").pack()  # Update total credits
-        tk.Label(summary_frame, text=f"Weighted Grade Sum: {weighted_sum}").pack()  # Update weighted grade sum
-        tk.Label(summary_frame, text=f"Average Grade: {average:.2f}").pack()  # Update average grade
+        # Append to the working list and refresh the table and summary.
+        self.courses.append(new_course)
+        self.populate_table()
+        self.update_summary()
 
-    add_btn = tk.Button(root, text="Add New Course", command=add_course)
-    add_btn.pack(pady=5)  # Button to add a new course
+    def delete_course(self) -> None:
+        """Delete the currently selected course from the table and list."""
+        row = self.table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "Delete Course", "Please select a course to delete.")
+            return
 
-    def delete_course():
-        """Deletes the selected course from the list and updates the UI."""
-        selected_item = tree.focus()  # Get the currently selected item
-        if not selected_item:
-            messagebox.showinfo("Delete Course", "Please select a course to delete.")
-            return  # Exit if no item is selected
-        values = tree.item(selected_item, "values")  # Get the values of the selected item
-        if not values:
-            return  # Exit if no values are found
-        label = values[0]  # Get the course label
+        label_item = self.table.item(row, 0)
+        if label_item is None:
+            return
 
-        confirm = messagebox.askyesno("Confirm Deletion", f"Are you sure you want to delete {label}?")
-        if confirm:
-            # Remove from list
-            for i, course in enumerate(unique_courses):
-                if course.label == label:
-                    del unique_courses[i]  # Delete the course from the list
-                    break
-            # Remove from tree
-            tree.delete(selected_item)  # Delete the course from the tree
+        label = label_item.text()
 
-            # Update summary
-            total_credits, weighted_sum, average = calculate_weighted_average(unique_courses)
-            for widget in summary_frame.winfo_children():
-                widget.destroy()  # Clear existing summary labels
-            tk.Label(summary_frame, text=f"Total Credits: {total_credits}").pack()  # Update total credits
-            tk.Label(summary_frame, text=f"Weighted Grade Sum: {weighted_sum}").pack()  # Update weighted grade sum
-            tk.Label(summary_frame, text=f"Average Grade: {average:.2f}").pack()  # Update average grade
+        # Confirm with the user before deleting.
+        reply = QMessageBox.question(
+            self,
+            "Confirm Deletion",
+            f"Are you sure you want to delete {label}?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+            )
+        if reply != QMessageBox.Yes:
+            return
 
-    delete_btn = tk.Button(root, text="Delete Selected Course", command=delete_course)
-    delete_btn.pack(pady=5)  # Button to delete the selected course
+        # Filter out the course with the matching label from the working list.
+        self.courses = [course for course in self.courses if course.label != label]
 
-    root.mainloop()  # Start the GUI event loop
+        # Remove the corresponding row from the table and update the summary.
+        self.table.removeRow(row)
+        self.update_summary()
+
+
+if __name__ == "__main__":
+    # ------------------------------------------------------------------
+    # Locate a transcript PDF in the current working directory.
+    # ------------------------------------------------------------------
+    def find_pdf_file() -> str | None:
+        """Return the first PDF filename found in the current directory.
+
+        If no PDF is found, returns None.
+        """
+        for file in os.listdir():
+            # We only consider files ending with .pdf (case-insensitive).
+            if file.lower().endswith(".pdf"):
+                return file
+        return None
+
+    pdf_file = find_pdf_file()
+
+    if not pdf_file:
+        # No transcript file found: exit with an error message and non-zero code.
+        print("No PDF file found in the current directory.")
+        sys.exit(1)
+
+    # Read and parse the PDF transcript.
+    pdf_text = read_pdf(pdf_file)
+    courses = parse_courses(pdf_text)
+
+    # Deduplicate by course label, keeping the last occurrence of each.
+    unique_courses = deduplicate_courses(courses)
+
+    # Build a mapping of label -> Course representing the original, unmodified
+    # transcript state. We clone by going through `to_dict()` to avoid sharing
+    # references.
+    original_courses = {
+        course.label: Course(**course.to_dict()) for course in unique_courses
+    }
+
+    # ------------------------------------------------------------------
+    # Start the Qt application and show the main window.
+    # ------------------------------------------------------------------
+    app = QApplication(sys.argv)
+
+    window = MainWindow(unique_courses, original_courses)
+    window.resize(900, 600)
+    window.show()
+
+    # Start the event loop.
+    sys.exit(app.exec())
